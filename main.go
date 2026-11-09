@@ -51,13 +51,14 @@ var batches = map[string]struct{ sortKey, command, idsField string }{
 }
 
 var units = map[byte]time.Duration{
+	'm': time.Minute,
 	'h': time.Hour,
 	'd': 24 * time.Hour,
 	'w': 7 * 24 * time.Hour,
-	'm': 30 * 24 * time.Hour,
+	'M': 30 * 24 * time.Hour,
 }
 
-// parsePace parses "<N><unit>" with unit h (hours), d (days), w (weeks), m (30-day months).
+// parsePace parses "<N><unit>" with unit m (minutes), h (hours), d (days), w (weeks), M (30-day months).
 func parsePace(s string) (time.Duration, error) {
 	if len(s) < 2 {
 		return 0, fmt.Errorf("invalid pace %q", s)
@@ -65,7 +66,7 @@ func parsePace(s string) (time.Duration, error) {
 	unit, ok := units[s[len(s)-1]]
 	n, err := strconv.Atoi(s[:len(s)-1])
 	if !ok || err != nil || n <= 0 || time.Duration(n) > math.MaxInt64/unit {
-		return 0, fmt.Errorf("invalid pace %q: want <N>h, <N>d, <N>w or <N>m", s)
+		return 0, fmt.Errorf("invalid pace %q: want <N>m, <N>h, <N>d, <N>w or <N>M", s)
 	}
 	return time.Duration(n) * unit, nil
 }

@@ -53,7 +53,7 @@ Don't regress these without a reason; only the batch ordering has an automated t
   - Sonarr/Radarr only update `lastSearchTime` when at least one indexer was searched. Items that no indexer matches (indexer tags) stay never-searched and are picked first in every batch; if N or more such items exist, batches never reach anything else.
   - API-posted commands run with `CommandTrigger.Manual`, so `MoviesSearch` also searches monitored movies that aren't available yet, as `MissingMoviesSearch` already does.
 - **Pace format (`parsePace`):** `<N><unit>`, where `N` is a positive integer.
-  - Units are case-sensitive: `h`, `d`, `w`, and `m` (30 **days**, not minutes).
+  - Units are case-sensitive: `m` (minutes), `h`, `d`, `w`, and `M` (30-day months). In v0.1.1 and earlier `m` meant months, so an old `1m` config now runs every minute.
   - Overflow is rejected (`time.Duration(n) > math.MaxInt64/unit`); otherwise an overflowed pace makes `run` hot-loop.
 - **Startup errors are fatal:** a bad pace, a pace set without its URL or key, a batch size that isn't a positive integer, no pace set at all, or a fatal `connect` result. An unset pace just disables that job. Once `connect` has passed, errors are never fatal. A fatal `connect` in one job can exit while another job's search is in flight; worst case, that search re-runs once on restart.
 - **No signal handling:** Go's default SIGTERM exit works even as PID 1 in scratch (`docker stop` takes about 0.1s). The worst case, a kill between the 201 and the state write, re-runs one search.
