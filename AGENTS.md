@@ -2,50 +2,56 @@
 
 ## Project Overview
 
-getterr is a tiny Go service that replaces Huntarr's paced backlog searches. On a schedule set per search, it POSTs Sonarr/Radarr "Wanted" commands (missing and cutoff-unmet) to `/api/v3/command`. It ships as a scratch Docker image published to `ghcr.io/pentago/getterr`. `README.md` is for end users and stays in plain, non-technical English; technical detail belongs here.
+getterr is a tiny Go service that replaces Huntarr's paced backlog searches. On a schedule set per search, it POSTs Sonarr/Radarr "Wanted" commands (missing and cutoff-unmet) to `/api/v3/command`, either for the whole list or for a batch of the least recently searched items. It ships as a scratch Docker image published to `ghcr.io/pentago/getterr`. `README.md` is for end users and stays in plain, non-technical English; technical detail belongs here.
 
 ## Architecture & Data Flow
 
 Everything lives in `main.go` (`package main`, stdlib only).
 
 1. `main` reads `STATE_DIR` (default `/data`) and builds one shared `http.Client`. It then walks the `jobs` table.
-2. `jobs` has one row per search: `{app, command, paceVar}`.
+2. `jobs` has one row per search: `{app, command, paceVar, wanted}`.
 
-   | Pace env var | Command |
-   |---|---|
-   | `SONARR_MISSING_PACE` | `MissingEpisodeSearch` |
-   | `SONARR_UNMET_PACE` | `CutoffUnmetEpisodeSearch` |
-   | `RADARR_MISSING_PACE` | `MissingMoviesSearch` |
-   | `RADARR_UNMET_PACE` | `CutoffUnmetMoviesSearch` |
+   | Pace env var | Command | Wanted list |
+   |---|---|---|
+   | `SONARR_MISSING_PACE` | `MissingEpisodeSearch` | `missing` |
+   | `SONARR_UNMET_PACE` | `CutoffUnmetEpisodeSearch` | `cutoff` |
+   | `RADARR_MISSING_PACE` | `MissingMoviesSearch` | `missing` |
+   | `RADARR_UNMET_PACE` | `CutoffUnmetMoviesSearch` | `cutoff` |
 
-   To add a search, add a row. `<APP>_URL` and `<APP>_API_KEY` are derived from `app`.
+   To add a search, add a row. `<APP>_URL`, `<APP>_API_KEY` and the optional `<APP>_BATCH_SIZE` (positive integer, shared by both searches of the app) are derived from `app`. `batches` maps `app` to its batch sort key and by-ID command (`EpisodeSearch {episodeIds}`, `MoviesSearch {movieIds}`).
 3. Each enabled job gets its own goroutine running `run`, and `main` blocks with `select {}`. Jobs share no mutable state; each owns its own state file.
 4. `run` loops:
    - Sleep until `last + pace`, then call `trigger`.
    - On success, set `last = now` and write it to the job's state file.
    - On failure, log, sleep `retryDelay` (5m) and retry. `last` is not advanced, so the pace timer only starts after a success.
-5. `trigger` sends `POST <url>/api/v3/command` with `{"name":"<command>"}` and the `X-Api-Key` header.
+5. `trigger` sends `POST <url>/api/v3/command` with the `X-Api-Key` header (via `api`):
+   - No batch size: `{"name":"<command>"}`, which searches the whole Wanted list.
+   - Batch size N: `oldestSearched` reads `GET /api/v3/wanted/<wanted>?monitored=true&pageSize=N&sortKey=<episodes|movies>.lastSearchTime` once ascending and once descending, keeps the N never-searched-then-oldest IDs, and posts the by-ID command. An empty list logs `nothing to search` and counts as a run. Rotation needs no state: Sonarr/Radarr set `lastSearchTime` on every searched item that at least one indexer matched.
 
 ### Non-obvious invariants
 
-Don't regress these without a reason; there are no automated tests for them.
+Don't regress these without a reason; only the batch ordering has an automated test.
 
-- **Only `201 Created` counts as success.** That's what Sonarr/Radarr return for a queued command (`StartCommand` returns `Created`). A 200 or 3xx usually means an auth proxy's login page, and nothing was queued.
+- **Only `201 Created` counts as success** for commands, and only `200 OK` for the Wanted GETs (`api`'s `want`). 201 is what Sonarr/Radarr return for a queued command (`StartCommand` returns `Created`). A 200 or 3xx on a POST usually means an auth proxy's login page, and nothing was queued; a login page on a GET fails JSON decoding.
 - **Redirects are never followed** (`CheckRedirect` returns `http.ErrUseLastResponse`). Go would forward `X-Api-Key` to the redirect target, and a POST that gets a 302 turns into a GET.
 - **State persistence:** one file per job in `$STATE_DIR`, holding a single RFC3339 timestamp. This stops container restarts from re-running searches early or skipping long paces.
   - A missing or unparseable file means "run now".
   - A failed write is only logged; that job then runs on the in-memory time until the next restart.
   - File names are part of deployed state: renaming them makes every existing deployment run each search once more, unless the files are renamed on the host before the new image starts.
+- **Batch ordering is database-independent.** Sonarr/Radarr pass `sortDirection` straight into SQL `ORDER BY` without `NULLS FIRST/LAST`, so never-searched items (null `lastSearchTime`) sort first ascending on SQLite but last on Postgres. `oldestSearched` reads N from both ends and merges, so either way the N never-searched-then-oldest items are in the union. `TestOldestSearched` covers both databases.
+  - Batch sort keys must stay in the controllers' allowlists (`MissingController`/`CutoffController` in `*.Api.V3/Wanted`); an unknown key silently falls back to the default sort and every run re-searches the same first N.
+  - Sonarr/Radarr only update `lastSearchTime` when at least one indexer was searched. Items that no indexer matches (indexer tags) stay never-searched and are picked first in every batch; if N or more such items exist, batches never reach anything else.
+  - API-posted commands run with `CommandTrigger.Manual`, so `MoviesSearch` also searches monitored movies that aren't available yet, as `MissingMoviesSearch` already does.
 - **Pace format (`parsePace`):** `<N><unit>`, where `N` is a positive integer.
   - Units are case-sensitive: `h`, `d`, `w`, and `m` (30 **days**, not minutes).
   - Overflow is rejected (`time.Duration(n) > math.MaxInt64/unit`); otherwise an overflowed pace makes `run` hot-loop.
-- **Config errors are fatal at startup:** a bad pace, a pace set without its URL or key, or no pace set at all. An unset pace just disables that job. Runtime errors are never fatal.
+- **Config errors are fatal at startup:** a bad pace, a pace set without its URL or key, a batch size that isn't a positive integer, or no pace set at all. An unset pace just disables that job. Runtime errors are never fatal.
 - **No signal handling:** Go's default SIGTERM exit works even as PID 1 in scratch (`docker stop` takes about 0.1s). The worst case, a kill between the 201 and the state write, re-runs one search.
 - **API version:** `/api/v3` works on Sonarr v4 and v5 (v5 keeps `Sonarr.Api.V3` alongside `V5`) and on Radarr v6/v7 (v3 only). Switch Sonarr to `/api/v5` only if v3 is removed.
 
 ## Key Directories
 
-- `/`: all source (`main.go`, `main_test.go`), `go.mod`, `Dockerfile`, `README.md`, `AGENTS.md`.
+- `/`: all source (`main.go`, `main_test.go`), `go.mod`, `staticcheck.conf` (every check enabled), `Dockerfile`, `README.md`, `AGENTS.md`.
 - `.github/workflows/`: `ci.yml` (test, docker build, publish `:dev`) and `release.yml` (tags).
 - `.worktrees/`: worktrunk (`wt`) worktrees, ignored by git (global gitignore) and skipped by `./...` because of the leading dot.
 
@@ -56,7 +62,7 @@ There's no Makefile. These mirror the CI `test` job; run all of them before open
 ```sh
 test -z "$(gofmt -l .)"
 go vet ./...
-go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...   # config: staticcheck.conf
 go test -race ./...
 go build ./...                      # binary ./getterr is gitignored
 docker build -t getterr .
@@ -73,14 +79,14 @@ STATE_DIR=/tmp/getterr SONARR_URL=http://127.0.0.1:8989 SONARR_API_KEY=... SONAR
 
 - **No dependencies:** stdlib only, so there's no `go.sum`. Keep it that way unless a dependency clearly pays for itself. If you add one, also add a `gomod` entry to `.github/dependabot.yml`.
 - **Single file:** everything stays in the root `package main`. The Dockerfile copies only `go.mod *.go`, so subpackages or a `go.sum` need that `COPY` line changed.
-- **Request body:** built by string concatenation, which is safe only because command names are constants from `jobs`. Use `encoding/json` if anything user-supplied ever goes in.
-- **Logging:** stdlib `log` to stderr, formatted `"<app> <Command>: <message>"` (e.g. `queued`, `next run at <RFC3339>`, `failed, retrying in 5m0s: <err>`, `disabled (X unset)`). No levels, no structured logging.
+- **Request body:** JSON via `encoding/json` in `api`.
+- **Logging:** stdlib `log` to stderr, formatted `"<app> <Command>: <message>"` (e.g. `queued`, `queued MoviesSearch for 5 items`, `nothing to search`, `next run at <RFC3339>`, `failed, retrying in 5m0s: <err>`, `disabled (X unset)`). No levels, no structured logging.
 - **Errors:** return plain `fmt.Errorf` errors. Use `log.Fatalf` only for startup config errors; at runtime, log and retry.
 
 ## Important Files
 
-- **`main.go`:** `jobs`, `units`, `parsePace`, `trigger`, `main`, `run`, `retryDelay`.
-- **`main_test.go`:** `TestParsePace`.
+- **`main.go`:** `jobs`, `batches`, `units`, `parsePace`, `api`, `trigger`, `oldestSearched`, `main`, `run`, `retryDelay`.
+- **`main_test.go`:** `TestParsePace`, `TestOldestSearched` (an `httptest` stub that sorts nulls like SQLite or Postgres).
 - **`Dockerfile`:**
   - The build stage runs on `--platform=$BUILDPLATFORM` and cross-compiles (`GOOS/GOARCH/GOARM=${TARGETVARIANT#v}`, `CGO_ENABLED=0`), so there's no QEMU.
   - The runtime is `scratch`: CA bundle (needed for HTTPS arr URLs), `/getterr`, and `/data` owned by `65532:65532`, run as `USER 65532:65532` with `VOLUME /data`.
@@ -113,8 +119,8 @@ STATE_DIR=/tmp/getterr SONARR_URL=http://127.0.0.1:8989 SONARR_API_KEY=... SONAR
 
 ## Testing & QA
 
-- **Framework:** stdlib `testing` only. `main_test.go` has `TestParsePace` with inline map/slice tables (valid cases, then invalid cases including overflow) and `t.Errorf("parsePace(%q) = ...")`.
-- **Coverage gaps:** `trigger` (201 check, no redirects), `run` (scheduling, state) and env wiring have no tests.
+- **Framework:** stdlib `testing` only. `main_test.go` has `TestParsePace` with inline map/slice tables (valid cases, then invalid cases including overflow) and `t.Errorf("parsePace(%q) = ...")`, and `TestOldestSearched`.
+- **Coverage gaps:** `api` (201/200 check, no redirects), `trigger`, `run` (scheduling, state) and env wiring have no tests.
   - When changing them, verify with a throwaway `net/http/httptest` server or a local Python stub.
   - Check that 201 → `queued` plus a state file is written, 302/200/401 → `failed, retrying`, and a restart honours the saved state.
 - **Container smoke test:** `docker run --rm getterr` with no env must exit 1 with `no *_PACE variable set, nothing to do`.
