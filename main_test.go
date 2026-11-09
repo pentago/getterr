@@ -3,9 +3,11 @@ package main
 import (
 	"cmp"
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
@@ -68,5 +70,40 @@ func TestOldestSearched(t *testing.T) {
 			}
 		}
 		srv.Close()
+	}
+}
+
+// Bazarr's wanted list has no last search time, so batches walk it by ID from
+// a persisted cursor and wrap around, searching every missing language.
+func TestBazarrBatch(t *testing.T) {
+	var searched []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Header.Get("X-Api-Key") != "key":
+			http.Error(w, "bad key", http.StatusUnauthorized)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/episodes/wanted":
+			io.WriteString(w, `{"data":[
+				{"sonarrSeriesId":9,"sonarrEpisodeId":5,"missing_subtitles":[{"code2":"en","forced":false,"hi":true}]},
+				{"sonarrSeriesId":7,"sonarrEpisodeId":1,"missing_subtitles":[{"code2":"en","forced":false,"hi":false},{"code2":"de","forced":true,"hi":false}]},
+				{"sonarrSeriesId":7,"sonarrEpisodeId":3,"missing_subtitles":[{"code2":"en","forced":false,"hi":false}]}]}`)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/episodes/subtitles":
+			q := r.URL.Query()
+			searched = append(searched, q.Get("seriesid")+"/"+q.Get("episodeid")+"/"+q.Get("language")+"/"+q.Get("forced")+"/"+q.Get("hi"))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected request "+r.URL.String(), http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	j := job{"bazarr", "wanted_search_missing_subtitles_series", "BAZARR_SERIES_PACE", "BAZARR_SERIES_BATCH_SIZE", "episodes"}
+	cursor := filepath.Join(t.TempDir(), "cursor")
+	for i, want := range [][]string{
+		{"7/1/en/false/false", "7/1/de/true/false", "7/3/en/false/false"},
+		{"9/5/en/false/true", "7/1/en/false/false", "7/1/de/true/false"}, // wraps around
+	} {
+		searched = nil
+		if _, err := bazarrBatch(srv.Client(), j, srv.URL, "key", 2, cursor); err != nil || !slices.Equal(searched, want) {
+			t.Errorf("batch %d searched %v, %v; want %v", i+1, searched, err, want)
+		}
 	}
 }
