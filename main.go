@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +22,13 @@ import (
 )
 
 const retryDelay = 5 * time.Minute
+
+// statusError is an HTTP reply with an unexpected status code.
+type statusError int
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("HTTP %d %s", int(e), http.StatusText(int(e)))
+}
 
 type job struct {
 	app, command, paceVar, wanted string
@@ -82,7 +91,7 @@ func api(client *http.Client, method, url, apiKey string, in, out any, want int)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != want {
-		return fmt.Errorf("HTTP %s", resp.Status)
+		return statusError(resp.StatusCode)
 	}
 	if out == nil {
 		return nil
@@ -139,6 +148,32 @@ func oldestSearched(client *http.Client, baseURL, apiKey, wanted, sortKey string
 	return ids, nil
 }
 
+// connect waits until baseURL answers as j.app and accepts apiKey. A rejected
+// key, an auth proxy or a URL pointing at another app won't fix itself, so
+// those are fatal. An unreachable app or a proxy's 5xx may just be starting up
+// (or be a mistyped address, which looks the same), so those are retried.
+func connect(client *http.Client, j job, baseURL, apiKey string) {
+	prefix := strings.ToUpper(j.app)
+	for {
+		var status struct{ AppName, Version string }
+		err := api(client, http.MethodGet, baseURL+"/api/v3/system/status", apiKey, nil, &status, http.StatusOK)
+		if err == nil && strings.EqualFold(status.AppName, j.app) {
+			log.Printf("%s %s: connected to %s %s at %s", j.app, j.command, status.AppName, status.Version, baseURL)
+			return
+		}
+		if err == nil {
+			log.Fatalf("%s %s: %s answers as %q, not %s; check %s_URL", j.app, j.command, baseURL, status.AppName, j.app, prefix)
+		}
+		var netErr *url.Error
+		var code statusError
+		if !errors.As(err, &netErr) && !(errors.As(err, &code) && code >= 500) {
+			log.Fatalf("%s %s: %s rejected the request, check %s_URL and %s_API_KEY: %v", j.app, j.command, baseURL, prefix, prefix, err)
+		}
+		log.Printf("%s %s: cannot reach %s, retrying in %s: %v", j.app, j.command, baseURL, retryDelay, err)
+		time.Sleep(retryDelay)
+	}
+}
+
 func main() {
 	stateDir := os.Getenv("STATE_DIR")
 	if stateDir == "" {
@@ -184,9 +219,11 @@ func main() {
 	select {}
 }
 
-// run triggers the job every pace. The last successful run time is persisted
-// so container restarts neither re-run early nor skip long (e.g. monthly) paces.
+// run checks the app is reachable, then triggers the job every pace. The last
+// successful run time is persisted so container restarts neither re-run early
+// nor skip long (e.g. monthly) paces.
 func run(client *http.Client, j job, pace time.Duration, batch int, baseURL, apiKey, statePath string) {
+	connect(client, j, baseURL, apiKey)
 	var last time.Time
 	if b, err := os.ReadFile(statePath); err == nil {
 		last, _ = time.Parse(time.RFC3339, strings.TrimSpace(string(b)))

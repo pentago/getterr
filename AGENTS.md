@@ -19,7 +19,10 @@ Everything lives in `main.go` (`package main`, stdlib only).
    | `RADARR_UNMET_PACE` | `CutoffUnmetMoviesSearch` | `cutoff` |
 
    To add a search, add a row. `<APP>_URL`, `<APP>_API_KEY` and the optional `<APP>_BATCH_SIZE` (positive integer, shared by both searches of the app) are derived from `app`. `batches` maps `app` to its batch sort key and by-ID command (`EpisodeSearch {episodeIds}`, `MoviesSearch {movieIds}`).
-3. Each enabled job gets its own goroutine running `run`, and `main` blocks with `select {}`. Jobs share no mutable state; each owns its own state file.
+3. Each enabled job gets its own goroutine running `run`, and `main` blocks with `select {}`. Jobs share no mutable state; each owns its own state file. `run` first calls `connect`, which loops on `GET /api/v3/system/status` until it gets `200` with a matching `appName`:
+   - Fatal (won't fix itself): any other non-5xx status (401 bad key, 404 wrong URL base, 3xx auth proxy), a non-JSON body (proxy login page), or an `appName` for the other app.
+   - Retried every `retryDelay`: transport errors (`*url.Error`: refused, DNS, timeout) and 5xx (a reverse proxy in front of an app that's still starting). A mistyped host or port is indistinguishable from an app that's still booting, so it's retried and logged as `cannot reach`, not fatal.
+   - Each app is checked once per enabled job, in that job's goroutine, so an unreachable Sonarr doesn't hold up Radarr.
 4. `run` loops:
    - Sleep until `last + pace`, then call `trigger`.
    - On success, set `last = now` and write it to the job's state file.
@@ -45,7 +48,7 @@ Don't regress these without a reason; only the batch ordering has an automated t
 - **Pace format (`parsePace`):** `<N><unit>`, where `N` is a positive integer.
   - Units are case-sensitive: `h`, `d`, `w`, and `m` (30 **days**, not minutes).
   - Overflow is rejected (`time.Duration(n) > math.MaxInt64/unit`); otherwise an overflowed pace makes `run` hot-loop.
-- **Config errors are fatal at startup:** a bad pace, a pace set without its URL or key, a batch size that isn't a positive integer, or no pace set at all. An unset pace just disables that job. Runtime errors are never fatal.
+- **Startup errors are fatal:** a bad pace, a pace set without its URL or key, a batch size that isn't a positive integer, no pace set at all, or a fatal `connect` result. An unset pace just disables that job. Once `connect` has passed, errors are never fatal. A fatal `connect` in one job can exit while another job's search is in flight; worst case, that search re-runs once on restart.
 - **No signal handling:** Go's default SIGTERM exit works even as PID 1 in scratch (`docker stop` takes about 0.1s). The worst case, a kill between the 201 and the state write, re-runs one search.
 - **API version:** `/api/v3` works on Sonarr v4 and v5 (v5 keeps `Sonarr.Api.V3` alongside `V5`) and on Radarr v6/v7 (v3 only). Switch Sonarr to `/api/v5` only if v3 is removed.
 
@@ -80,12 +83,12 @@ STATE_DIR=/tmp/getterr SONARR_URL=http://127.0.0.1:8989 SONARR_API_KEY=... SONAR
 - **No dependencies:** stdlib only, so there's no `go.sum`. Keep it that way unless a dependency clearly pays for itself. If you add one, also add a `gomod` entry to `.github/dependabot.yml`.
 - **Single file:** everything stays in the root `package main`. The Dockerfile copies only `go.mod *.go`, so subpackages or a `go.sum` need that `COPY` line changed.
 - **Request body:** JSON via `encoding/json` in `api`.
-- **Logging:** stdlib `log` to stderr, formatted `"<app> <Command>: <message>"` (e.g. `queued`, `queued MoviesSearch for 5 items`, `nothing to search`, `next run at <RFC3339>`, `failed, retrying in 5m0s: <err>`, `disabled (X unset)`). No levels, no structured logging.
-- **Errors:** return plain `fmt.Errorf` errors. Use `log.Fatalf` only for startup config errors; at runtime, log and retry.
+- **Logging:** stdlib `log` to stderr, formatted `"<app> <Command>: <message>"` (e.g. `connected to Sonarr <v> at <url>`, `cannot reach <url>, retrying in 5m0s: <err>`, `queued`, `queued MoviesSearch for 5 items`, `nothing to search`, `next run at <RFC3339>`, `failed, retrying in 5m0s: <err>`, `disabled (X unset)`). No levels, no structured logging.
+- **Errors:** return plain `fmt.Errorf` errors. Use `log.Fatalf` only for startup errors; at runtime, log and retry.
 
 ## Important Files
 
-- **`main.go`:** `jobs`, `batches`, `units`, `parsePace`, `api`, `trigger`, `oldestSearched`, `main`, `run`, `retryDelay`.
+- **`main.go`:** `jobs`, `batches`, `units`, `statusError`, `parsePace`, `api`, `trigger`, `oldestSearched`, `connect`, `main`, `run`, `retryDelay`.
 - **`main_test.go`:** `TestParsePace`, `TestOldestSearched` (an `httptest` stub that sorts nulls like SQLite or Postgres).
 - **`Dockerfile`:**
   - The build stage runs on `--platform=$BUILDPLATFORM` and cross-compiles (`GOOS/GOARCH/GOARM=${TARGETVARIANT#v}`, `CGO_ENABLED=0`), so there's no QEMU.
@@ -120,7 +123,7 @@ STATE_DIR=/tmp/getterr SONARR_URL=http://127.0.0.1:8989 SONARR_API_KEY=... SONAR
 ## Testing & QA
 
 - **Framework:** stdlib `testing` only. `main_test.go` has `TestParsePace` with inline map/slice tables (valid cases, then invalid cases including overflow) and `t.Errorf("parsePace(%q) = ...")`, and `TestOldestSearched`.
-- **Coverage gaps:** `api` (201/200 check, no redirects), `trigger`, `run` (scheduling, state) and env wiring have no tests.
+- **Coverage gaps:** `api` (201/200 check, no redirects), `trigger`, `connect` (fatal vs retried), `run` (scheduling, state) and env wiring have no tests.
   - When changing them, verify with a throwaway `net/http/httptest` server or a local Python stub.
   - Check that 201 → `queued` plus a state file is written, 302/200/401 → `failed, retrying`, and a restart honours the saved state.
 - **Container smoke test:** `docker run --rm getterr` with no env must exit 1 with `no *_PACE variable set, nothing to do`.
