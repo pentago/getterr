@@ -18,12 +18,12 @@ services:
       SONARR_URL: http://sonarr:8989
       SONARR_API_KEY: your-sonarr-api-key
       SONARR_MISSING_PACE: 1w
-      SONARR_UNMET_PACE: 1m
+      SONARR_UNMET_PACE: 1M
       SONARR_BATCH_SIZE: 10
       RADARR_URL: http://radarr:7878
       RADARR_API_KEY: your-radarr-api-key
       RADARR_MISSING_PACE: 1w
-      RADARR_UNMET_PACE: 1m
+      RADARR_UNMET_PACE: 1M
       RADARR_BATCH_SIZE: 5
     volumes:
       - ./config/getterr:/data
@@ -45,10 +45,13 @@ Use `ghcr.io/pentago/getterr:dev` instead if you want the newest changes before 
 
 How often is a number plus a letter:
 
+- `10m`: every 10 minutes
 - `6h`: every 6 hours
 - `1d`: every day
 - `1w`: every week
-- `1m`: every 30 days
+- `1M`: every 30 days
+
+Small `m` is minutes and capital `M` is months. In version 0.1.1 and earlier, small `m` meant months, so if you're upgrading, change settings like `1m` to `1M`, or getterr will search every minute.
 
 Leave a setting out to turn that search off. If you only use Sonarr, you can skip all the Radarr settings, and the other way around.
 
