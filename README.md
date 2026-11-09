@@ -19,10 +19,12 @@ services:
       SONARR_API_KEY: your-sonarr-api-key
       SONARR_MISSING_PACE: 1w
       SONARR_UNMET_PACE: 1m
+      SONARR_BATCH_SIZE: 10
       RADARR_URL: http://radarr:7878
       RADARR_API_KEY: your-radarr-api-key
       RADARR_MISSING_PACE: 1w
       RADARR_UNMET_PACE: 1m
+      RADARR_BATCH_SIZE: 5
     volumes:
       - ./config/getterr:/data
 ```
@@ -39,21 +41,24 @@ Use `ghcr.io/pentago/getterr:dev` instead if you want the newest changes before 
 | `SONARR_API_KEY`, `RADARR_API_KEY` | Their API keys. |
 | `SONARR_MISSING_PACE`, `RADARR_MISSING_PACE` | How often to search for things you don't have yet. |
 | `SONARR_UNMET_PACE`, `RADARR_UNMET_PACE` | How often to search for better-quality copies of things you have. |
+| `SONARR_BATCH_SIZE`, `RADARR_BATCH_SIZE` | Optional. Search only this many episodes or movies each time instead of the whole list. |
 
 How often is a number plus a letter:
 
 - `6h`: every 6 hours
 - `1d`: every day
 - `1w`: every week
-- `1m`: every month (30 days)
+- `1m`: every 30 days
 
 Leave a setting out to turn that search off. If you only use Sonarr, you can skip all the Radarr settings, and the other way around.
+
+To work through a big list a little at a time, pair a batch size with a short pace. For example, `RADARR_BATCH_SIZE: 5` with `RADARR_MISSING_PACE: 1h` searches 5 movies every hour, and `SONARR_BATCH_SIZE: 10` with `SONARR_MISSING_PACE: 1h` searches 10 episodes every hour. Each batch picks the ones that have never been searched first, then the ones searched longest ago, so over time everything gets its turn. The batch size applies to both the Missing and Cutoff Unmet searches of that app.
 
 ## Good to know
 
 - getterr runs each search once when it first starts, then on your schedule after that.
 - It remembers when each search last ran. That's what the `/data` volume is for, so restarting or updating the container won't trigger extra searches.
 - If Sonarr or Radarr can't be reached, it tries again every 5 minutes and doesn't lose its schedule.
-- Each search goes through your whole Missing or Cutoff Unmet list. On a big library that's a lot of queries, so if your indexers have daily limits, set a Query Limit for each indexer in Prowlarr.
+- Without a batch size, each search goes through your whole Missing or Cutoff Unmet list. On a big library that's a lot of queries, so either set a batch size or, if your indexers have daily limits, set a Query Limit for each indexer in Prowlarr.
 - Check `docker logs getterr` to see what it's doing.
 - It works on regular PCs, ARM machines, and Apple silicon Macs running Docker.

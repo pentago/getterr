@@ -1,14 +1,19 @@
-// getterr periodically triggers Sonarr/Radarr "Wanted" searches
+// Getterr periodically triggers Sonarr/Radarr "Wanted" searches
 // (missing + cutoff unmet) via their /api/v3/command endpoint.
 package main
 
 import (
+	"bytes"
+	"cmp"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,14 +22,20 @@ import (
 const retryDelay = 5 * time.Minute
 
 type job struct {
-	app, command, paceVar string
+	app, command, paceVar, wanted string
 }
 
 var jobs = []job{
-	{"sonarr", "MissingEpisodeSearch", "SONARR_MISSING_PACE"},
-	{"sonarr", "CutoffUnmetEpisodeSearch", "SONARR_UNMET_PACE"},
-	{"radarr", "MissingMoviesSearch", "RADARR_MISSING_PACE"},
-	{"radarr", "CutoffUnmetMoviesSearch", "RADARR_UNMET_PACE"},
+	{"sonarr", "MissingEpisodeSearch", "SONARR_MISSING_PACE", "missing"},
+	{"sonarr", "CutoffUnmetEpisodeSearch", "SONARR_UNMET_PACE", "cutoff"},
+	{"radarr", "MissingMoviesSearch", "RADARR_MISSING_PACE", "missing"},
+	{"radarr", "CutoffUnmetMoviesSearch", "RADARR_UNMET_PACE", "cutoff"},
+}
+
+// batches says how each app searches a <APP>_BATCH_SIZE batch of wanted items by ID.
+var batches = map[string]struct{ sortKey, command, idsField string }{
+	"sonarr": {"episodes.lastSearchTime", "EpisodeSearch", "episodeIds"},
+	"radarr": {"movies.lastSearchTime", "MoviesSearch", "movieIds"},
 }
 
 var units = map[byte]time.Duration{
@@ -47,8 +58,19 @@ func parsePace(s string) (time.Duration, error) {
 	return time.Duration(n) * unit, nil
 }
 
-func trigger(client *http.Client, baseURL, apiKey, command string) error {
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v3/command", strings.NewReader(`{"name":"`+command+`"}`))
+// api sends a JSON request and decodes the JSON reply into out, if non-nil.
+// Only the want status counts as success: anything else (e.g. an auth proxy's
+// redirect or login page) means the request never reached Sonarr/Radarr.
+func api(client *http.Client, method, url, apiKey string, in, out any, want int) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		return err
 	}
@@ -58,13 +80,63 @@ func trigger(client *http.Client, baseURL, apiKey, command string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	// Sonarr/Radarr answer a queued command with 201; anything else (e.g. an
-	// auth proxy's redirect or login page) means nothing was queued.
-	if resp.StatusCode != http.StatusCreated {
+	defer resp.Body.Close()
+	if resp.StatusCode != want {
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
-	return nil
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// trigger queues j's search over the whole Wanted list or, when batch > 0,
+// over the batch least recently searched items. It returns a log message.
+func trigger(client *http.Client, j job, baseURL, apiKey string, batch int) (string, error) {
+	cmd, msg := map[string]any{"name": j.command}, "queued"
+	if batch > 0 {
+		b := batches[j.app]
+		ids, err := oldestSearched(client, baseURL, apiKey, j.wanted, b.sortKey, batch)
+		if err != nil {
+			return "", err
+		}
+		if len(ids) == 0 {
+			return "nothing to search", nil
+		}
+		cmd = map[string]any{"name": b.command, b.idsField: ids}
+		msg = fmt.Sprintf("queued %s for %d items", b.command, len(ids))
+	}
+	// Sonarr/Radarr answer a queued command with 201.
+	return msg, api(client, http.MethodPost, baseURL+"/api/v3/command", apiKey, cmd, nil, http.StatusCreated)
+}
+
+// oldestSearched returns up to n IDs from the "missing" or "cutoff" Wanted
+// list: never searched first, then least recently searched. Sonarr/Radarr sort
+// a null lastSearchTime first on SQLite but last on Postgres, so it reads n
+// items from each end of the sort; on either database the n oldest are among them.
+func oldestSearched(client *http.Client, baseURL, apiKey, wanted, sortKey string, n int) ([]int, error) {
+	type record struct {
+		ID             int       `json:"id"`
+		LastSearchTime time.Time `json:"lastSearchTime"` // zero if never searched
+	}
+	var records []record
+	for _, dir := range []string{"ascending", "descending"} {
+		var page struct{ Records []record }
+		url := fmt.Sprintf("%s/api/v3/wanted/%s?monitored=true&pageSize=%d&sortKey=%s&sortDirection=%s", baseURL, wanted, n, sortKey, dir)
+		if err := api(client, http.MethodGet, url, apiKey, nil, &page, http.StatusOK); err != nil {
+			return nil, err
+		}
+		records = append(records, page.Records...)
+	}
+	slices.SortFunc(records, func(a, b record) int {
+		return cmp.Or(a.LastSearchTime.Compare(b.LastSearchTime), cmp.Compare(a.ID, b.ID))
+	})
+	records = slices.CompactFunc(records, func(a, b record) bool { return a.ID == b.ID })
+	ids := make([]int, 0, n)
+	for _, r := range records[:min(n, len(records))] {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
 }
 
 func main() {
@@ -95,9 +167,15 @@ func main() {
 		if baseURL == "" || apiKey == "" {
 			log.Fatalf("%s is set but %s_URL or %s_API_KEY is missing", j.paceVar, prefix, prefix)
 		}
+		batch := 0
+		if raw := os.Getenv(prefix + "_BATCH_SIZE"); raw != "" {
+			if batch, err = strconv.Atoi(raw); err != nil || batch <= 0 {
+				log.Fatalf("%s_BATCH_SIZE: invalid %q, want a positive number", prefix, raw)
+			}
+		}
 		// SONARR_MISSING_PACE -> sonarr-missing
 		state := strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(j.paceVar, "_PACE"), "_", "-"))
-		go run(client, j, pace, baseURL, apiKey, filepath.Join(stateDir, state))
+		go run(client, j, pace, batch, baseURL, apiKey, filepath.Join(stateDir, state))
 		started++
 	}
 	if started == 0 {
@@ -108,7 +186,7 @@ func main() {
 
 // run triggers the job every pace. The last successful run time is persisted
 // so container restarts neither re-run early nor skip long (e.g. monthly) paces.
-func run(client *http.Client, j job, pace time.Duration, baseURL, apiKey, statePath string) {
+func run(client *http.Client, j job, pace time.Duration, batch int, baseURL, apiKey, statePath string) {
 	var last time.Time
 	if b, err := os.ReadFile(statePath); err == nil {
 		last, _ = time.Parse(time.RFC3339, strings.TrimSpace(string(b)))
@@ -119,12 +197,13 @@ func run(client *http.Client, j job, pace time.Duration, baseURL, apiKey, stateP
 			log.Printf("%s %s: next run at %s", j.app, j.command, next.Format(time.RFC3339))
 			time.Sleep(wait)
 		}
-		if err := trigger(client, baseURL, apiKey, j.command); err != nil {
+		msg, err := trigger(client, j, baseURL, apiKey, batch)
+		if err != nil {
 			log.Printf("%s %s: failed, retrying in %s: %v", j.app, j.command, retryDelay, err)
 			time.Sleep(retryDelay)
 			continue
 		}
-		log.Printf("%s %s: queued", j.app, j.command)
+		log.Printf("%s %s: %s", j.app, j.command, msg)
 		last = time.Now()
 		if err := os.WriteFile(statePath, []byte(last.Format(time.RFC3339)), 0o644); err != nil {
 			log.Printf("%s %s: cannot persist last run: %v", j.app, j.command, err)
