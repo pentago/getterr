@@ -2,7 +2,7 @@
 
 getterr keeps Sonarr and Radarr hunting for the shows and movies you're still missing, and for better-quality copies of ones you already have.
 
-Sonarr and Radarr only grab new releases as they show up. Anything older, like episodes that aired before you added a show, they won't look for unless you click "Search All" yourself. getterr does that for you on a schedule, the job Huntarr used to do.
+Sonarr and Radarr only grab new releases as they show up. Anything older, like episodes that aired before you added a show, they won't look for unless you click "Search All" yourself. getterr does that for you on a schedule, the job now defunct Huntarr used to do.
 
 ## Running it
 
@@ -12,6 +12,7 @@ Add this to your Docker Compose file:
 services:
   getterr:
     image: ghcr.io/pentago/getterr:latest
+    user: 1000:1000
     restart: unless-stopped
     environment:
       SONARR_URL: http://sonarr:8989
@@ -23,10 +24,7 @@ services:
       RADARR_MISSING_PACE: 1w
       RADARR_UNMET_PACE: 1m
     volumes:
-      - getterr-data:/data
-
-volumes:
-  getterr-data:
+      - ./config/getterr:/data
 ```
 
 Then start it with `docker compose up -d getterr`. You'll find the API keys in Sonarr and Radarr under Settings → General.
