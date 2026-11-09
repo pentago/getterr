@@ -95,7 +95,9 @@ func main() {
 		if baseURL == "" || apiKey == "" {
 			log.Fatalf("%s is set but %s_URL or %s_API_KEY is missing", j.paceVar, prefix, prefix)
 		}
-		go run(client, j, pace, baseURL, apiKey, filepath.Join(stateDir, j.command))
+		// SONARR_MISSING_PACE -> sonarr-missing
+		state := strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(j.paceVar, "_PACE"), "_", "-"))
+		go run(client, j, pace, baseURL, apiKey, filepath.Join(stateDir, state))
 		started++
 	}
 	if started == 0 {
