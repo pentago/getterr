@@ -60,7 +60,7 @@ How often is a number plus a letter:
 - `1w`: every week
 - `1M`: every 30 days
 
-Small `m` is minutes and capital `M` is months. To spare your indexers, a search over the whole list can run at most once an hour; getterr refuses to start with a shorter pace. Batches can run as often as you like. In version 0.1.1 and earlier, small `m` meant months, so if you're upgrading, change settings like `1m` to `1M`.
+Small `m` is minutes and capital `M` is months, and there's no minimum: `1m` with a batch size of 1 searches one item every minute. In version 0.1.1 and earlier, small `m` meant months, so if you're upgrading, change settings like `1m` to `1M`, or getterr will search every minute.
 
 Leave a setting out to turn that search off. If you only use Sonarr, you can skip all the Radarr and Bazarr settings, and so on.
 

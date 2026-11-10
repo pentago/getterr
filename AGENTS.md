@@ -21,8 +21,8 @@ Everything lives in `main.go` (`package main`, stdlib only). Read it for the det
 - **Batch commands run as manual searches** (`CommandTrigger.Manual`), so Radarr's `MoviesSearch` also searches monitored movies that aren't available yet, like `MissingMoviesSearch` does.
 - **State** lives in `$STATE_DIR` (default `/data`): `<state>` holds the last run as RFC3339, `<state>.cursor` the last batch ID. Missing or unparseable means "run now" / "start at the lowest ID". File names are deployed state; renaming them re-runs every search once. Startup fails if the dir isn't writable (Docker creates missing bind-mount dirs as root); later write failures are only logged.
 - **Batches rotate by ID cursor for every app.** Sonarr/Radarr Wanted lists can't be sorted by ID (sortKey allowlists in `MissingController`/`CutoffController`), so `arr.searchBatch` reads the whole list with `pageSize=1000000` (no server cap today) and errors if `totalRecords` says the list was cut short. Bazarr's wanted list returns everything without paging params. `lastSearchTime` isn't used: Sonarr/Radarr only set it when an indexer was searched, so tag-excluded items would stay "never searched" and starve every batch. A failure mid-batch re-queues the queued part on retry.
-- **Pace floor (`schedule`):** whole-list searches at least `1h`. It protects indexers and rejects v0.1.1-era configs where `m` meant months. Batches have no floor so slow trickles (e.g. one Bazarr item a minute) stay possible; v0.1.1 batch configs fail on `SONARR_BATCH_SIZE`/`RADARR_BATCH_SIZE` (v0.1.2 and earlier), which are rejected so they can't silently become whole-list searches.
-- **Pace format (`parsePace`):** `<N><unit>`, positive integer N, case-sensitive units `m h d w M` (M = 30 days), overflow rejected.
+- **Old batch sizes:** `SONARR_BATCH_SIZE`/`RADARR_BATCH_SIZE` (v0.1.2 and earlier) are rejected at startup so they can't silently become whole-list searches.
+- **Pace format (`parsePace`):** `<N><unit>`, positive integer N, case-sensitive units `m h d w M` (M = 30 days), overflow rejected. No minimum, by the user's choice: `1m` with batch size 1 is a valid trickle. In v0.1.1 and earlier `m` meant months, so an old `1m` now runs every minute.
 - **Bazarr whole-list search** is `POST /api/system/tasks?taskid=…`, which reschedules Bazarr's own job to now, so users set that task to "Never" in Bazarr. The task only exists while Bazarr is connected to Sonarr/Radarr; otherwise Bazarr answers 500.
 - **Bazarr batches** send one `PATCH /api/<episodes|movies>/subtitles` per missing language. Its API key is the top-level `auth.apikey` in Bazarr's config, sent as `X-Api-Key` (headers are case-insensitive).
 - **API versions:** `/api/v3` works on Sonarr v4/v5 and Radarr v6/v7. Bazarr's API is unversioned.
@@ -50,7 +50,7 @@ Run locally: `mkdir -p /tmp/getterr && STATE_DIR=/tmp/getterr SONARR_URL=http://
 - **Single file** in the root `package main`.
 - **Logging:** stdlib `log`, `"<app>: <desc> - <message>"` via `search.String`. No levels.
 - **Errors:** plain `fmt.Errorf`; `log.Fatalf` only at startup.
-- **Tests:** stdlib `testing` with `httptest` stubs. They cover pace parsing, the pace floor, `connect` fatal vs retry, and batch rotation for `arr` and `bazarr`. `run` (scheduling, state) isn't covered; check it with a stub server when changing it.
+- **Tests:** stdlib `testing` with `httptest` stubs. They cover pace parsing, `connect` fatal vs retry, and batch rotation for `arr` and `bazarr`. `run` (scheduling, state) isn't covered; check it with a stub server when changing it.
 
 ## Build & Release
 

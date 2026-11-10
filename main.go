@@ -277,13 +277,6 @@ func (s search) schedule() (pace time.Duration, batch int, err error) {
 			return 0, 0, fmt.Errorf("%s_BATCH_SIZE: invalid %q, want a positive number", s.setting, b)
 		}
 	}
-	// Searching a whole Wanted list more than hourly hammers the indexers.
-	// This also catches configs from v0.1.1 and earlier, where m meant months
-	// (their batch sizes are rejected in main). Batches may trickle as fast as
-	// the user likes.
-	if batch == 0 && pace < time.Hour {
-		return 0, 0, fmt.Errorf("%s_PACE: %s is too often for a whole-list search, the minimum is 1h (months are M, not m)", s.setting, raw)
-	}
 	return pace, batch, nil
 }
 

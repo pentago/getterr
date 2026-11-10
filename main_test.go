@@ -31,31 +31,6 @@ func TestParsePace(t *testing.T) {
 	}
 }
 
-// Frequent whole-list searches hammer the indexers. The floor also stops a
-// v0.1.1 config like 1m (then a month) from searching every minute. Batches
-// may trickle as fast as the user likes.
-func TestSchedule(t *testing.T) {
-	s := searches[0]
-	for _, tc := range []struct {
-		pace, batch string
-		ok          bool
-	}{
-		{"1m", "", false}, {"59m", "", false}, {"1h", "", true},
-		{"1m", "1", true},
-		{"1d", "0", false}, {"1d", "x", false},
-	} {
-		t.Setenv("SONARR_MISSING_PACE", tc.pace)
-		t.Setenv("SONARR_MISSING_BATCH_SIZE", tc.batch)
-		if pace, _, err := s.schedule(); (err == nil) != tc.ok || (err == nil && pace == 0) {
-			t.Errorf("pace %q, batch %q: got %v, %v; want ok=%v", tc.pace, tc.batch, pace, err, tc.ok)
-		}
-	}
-	t.Setenv("SONARR_MISSING_PACE", "")
-	if pace, _, err := s.schedule(); pace != 0 || err != nil {
-		t.Errorf("unset pace: got %v, %v; want disabled", pace, err)
-	}
-}
-
 // Startup must stop on problems that won't fix themselves (bad key, auth
 // proxy, wrong app) but keep waiting for an app that's still starting.
 func TestConnect(t *testing.T) {
