@@ -245,6 +245,33 @@ func parsePace(s string) (time.Duration, error) {
 	return time.Duration(n) * unit, nil
 }
 
+// schedule reads s's pace and batch size. A zero pace means s is disabled.
+func (s search) schedule() (pace time.Duration, batch int, err error) {
+	raw := os.Getenv(s.setting + "_PACE")
+	if raw == "" {
+		return 0, 0, nil
+	}
+	if pace, err = parsePace(raw); err != nil {
+		return 0, 0, fmt.Errorf("%s_PACE: %w", s.setting, err)
+	}
+	if b := os.Getenv(s.setting + "_BATCH_SIZE"); b != "" {
+		if batch, err = strconv.Atoi(b); err != nil || batch <= 0 {
+			return 0, 0, fmt.Errorf("%s_BATCH_SIZE: invalid %q, want a positive number", s.setting, b)
+		}
+	}
+	// Searching a whole Wanted list more than hourly, or a batch more often
+	// than every 10 minutes, hammers the indexers. This also catches configs
+	// from v0.1.1 and earlier, where m meant months.
+	floor, floorRaw := time.Hour, "1h"
+	if batch > 0 {
+		floor, floorRaw = 10*time.Minute, "10m"
+	}
+	if pace < floor {
+		return 0, 0, fmt.Errorf("%s_PACE: %s is too often, the minimum is %s (months are M, not m)", s.setting, raw, floorRaw)
+	}
+	return pace, batch, nil
+}
+
 // trigger queues s's search over the whole Wanted list or, when batch > 0,
 // over the next batch items, keeping the batch position in cursorPath. It
 // returns a log message. A failed cursor write is only logged.
@@ -311,26 +338,18 @@ func main() {
 
 	var runs []func()
 	for _, s := range searches {
-		paceVar, batchVar := s.setting+"_PACE", s.setting+"_BATCH_SIZE"
-		raw := os.Getenv(paceVar)
-		if raw == "" {
-			log.Printf("%s - disabled (%s unset)", s, paceVar)
-			continue
-		}
-		pace, err := parsePace(raw)
+		pace, batch, err := s.schedule()
 		if err != nil {
-			log.Fatalf("%s - %s: %v", s, paceVar, err)
+			log.Fatalf("%s - %v", s, err)
+		}
+		if pace == 0 {
+			log.Printf("%s - disabled (%s_PACE unset)", s, s.setting)
+			continue
 		}
 		prefix := s.appVar()
 		c := conn{client, strings.TrimRight(os.Getenv(prefix+"_URL"), "/"), os.Getenv(prefix + "_API_KEY")}
 		if c.url == "" || c.key == "" {
-			log.Fatalf("%s - %s is set but %s_URL or %s_API_KEY is missing", s, paceVar, prefix, prefix)
-		}
-		batch := 0
-		if raw := os.Getenv(batchVar); raw != "" {
-			if batch, err = strconv.Atoi(raw); err != nil || batch <= 0 {
-				log.Fatalf("%s - %s: invalid %q, want a positive number", s, batchVar, raw)
-			}
+			log.Fatalf("%s - %s_PACE is set but %s_URL or %s_API_KEY is missing", s, s.setting, prefix, prefix)
 		}
 		// SONARR_MISSING -> sonarr-missing
 		state := strings.ToLower(strings.ReplaceAll(s.setting, "_", "-"))
