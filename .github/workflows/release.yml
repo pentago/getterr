@@ -5,14 +5,21 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
+  # Tags are meant for commits that passed CI; this catches the ones that didn't.
+  test:
+    uses: ./.github/workflows/test.yml
+
   release:
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,9 +33,16 @@ jobs:
       - id: meta
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/getterr"
+          version=${GITHUB_REF_NAME#v}
+          # Pre-releases like v1.0.0-rc1 don't move :latest.
+          tags="$image:$version"
+          if [[ $version != *-* ]]; then
+            tags+=",$image:latest"
+          fi
           {
             echo "image=$image"
-            echo "version=${GITHUB_REF_NAME#v}"
+            echo "version=$version"
+            echo "tags=$tags"
             echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
       - id: build
@@ -49,13 +63,16 @@ jobs:
             org.opencontainers.image.url=${{ github.event.repository.html_url }}
             org.opencontainers.image.source=${{ github.event.repository.html_url }}
             org.opencontainers.image.documentation=${{ github.event.repository.html_url }}#readme
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
-            ${{ steps.meta.outputs.image }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.meta.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+        run: |
+          pre=()
+          if [[ $GITHUB_REF_NAME == *-* ]]; then
+            pre=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${pre[@]}"
