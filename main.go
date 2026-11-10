@@ -309,7 +309,7 @@ func main() {
 		}
 	}
 
-	started := 0
+	var runs []func()
 	for _, s := range searches {
 		paceVar, batchVar := s.setting+"_PACE", s.setting+"_BATCH_SIZE"
 		raw := os.Getenv(paceVar)
@@ -334,11 +334,21 @@ func main() {
 		}
 		// SONARR_MISSING -> sonarr-missing
 		state := strings.ToLower(strings.ReplaceAll(s.setting, "_", "-"))
-		go run(s, c, pace, batch, filepath.Join(stateDir, state))
-		started++
+		runs = append(runs, func() { run(s, c, pace, batch, filepath.Join(stateDir, state)) })
 	}
-	if started == 0 {
+	if len(runs) == 0 {
 		log.Fatal("no *_PACE variable set, nothing to do")
+	}
+	// Without a writable state dir, every restart re-runs every search and
+	// batches never get past the first one.
+	f, err := os.CreateTemp(stateDir, ".write-test-*")
+	if err != nil {
+		log.Fatalf("cannot write to %s as user %d: %v", stateDir, os.Getuid(), err)
+	}
+	f.Close()
+	os.Remove(f.Name())
+	for _, r := range runs {
+		go r()
 	}
 	select {}
 }

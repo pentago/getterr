@@ -37,7 +37,7 @@ services:
       - ./config/getterr:/data
 ```
 
-Then start it with `docker compose up -d getterr`. You'll find the API keys in Sonarr, Radarr and Bazarr under Settings → General.
+Create the `config/getterr` folder yourself first (`mkdir -p config/getterr`), so it belongs to the user getterr runs as (`user:` above). Otherwise Docker creates it owned by root, and getterr stops right away because it can't save anything there. Then start it with `docker compose up -d getterr`. You'll find the API keys in Sonarr, Radarr and Bazarr under Settings → General.
 
 Use `ghcr.io/pentago/getterr:dev` instead if you want the newest changes before they're released.
 
