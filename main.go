@@ -116,9 +116,15 @@ func (arr) searchAll(c conn, command string) error {
 func (a arr) searchBatch(c conn, list string, cursor, n int) (int, string, error) {
 	// Wanted lists can't be sorted by ID, so this reads the whole list.
 	// pageSize has no upper limit.
-	var page struct{ Records []struct{ ID int } }
+	var page struct {
+		TotalRecords int
+		Records      []struct{ ID int }
+	}
 	if err := c.do(http.MethodGet, "/api/v3/wanted/"+list+"?monitored=true&pageSize=1000000", nil, &page, http.StatusOK); err != nil {
 		return 0, "", err
+	}
+	if page.TotalRecords > len(page.Records) {
+		return 0, "", fmt.Errorf("got %d of %d wanted items; the page size is capped", len(page.Records), page.TotalRecords)
 	}
 	ids := make([]int, len(page.Records))
 	for i, r := range page.Records {
@@ -271,15 +277,12 @@ func (s search) schedule() (pace time.Duration, batch int, err error) {
 			return 0, 0, fmt.Errorf("%s_BATCH_SIZE: invalid %q, want a positive number", s.setting, b)
 		}
 	}
-	// Searching a whole Wanted list more than hourly, or a batch more often
-	// than every 10 minutes, hammers the indexers. This also catches configs
-	// from v0.1.1 and earlier, where m meant months.
-	floor, floorRaw := time.Hour, "1h"
-	if batch > 0 {
-		floor, floorRaw = 10*time.Minute, "10m"
-	}
-	if pace < floor {
-		return 0, 0, fmt.Errorf("%s_PACE: %s is too often, the minimum is %s (months are M, not m)", s.setting, raw, floorRaw)
+	// Searching a whole Wanted list more than hourly hammers the indexers.
+	// This also catches configs from v0.1.1 and earlier, where m meant months
+	// (their batch sizes are rejected in main). Batches may trickle as fast as
+	// the user likes.
+	if batch == 0 && pace < time.Hour {
+		return 0, 0, fmt.Errorf("%s_PACE: %s is too often for a whole-list search, the minimum is 1h (months are M, not m)", s.setting, raw)
 	}
 	return pace, batch, nil
 }
@@ -391,9 +394,9 @@ func run(s search, c conn, pace time.Duration, batch int, statePath string) {
 		last, _ = time.Parse(time.RFC3339, strings.TrimSpace(string(b)))
 	}
 	for {
-		next := last.Add(pace)
-		if wait := time.Until(next); wait > 0 {
-			log.Printf("%s - next run at %s", s, next.Format(time.RFC3339))
+		due := last.Add(pace)
+		if wait := time.Until(due); wait > 0 {
+			log.Printf("%s - next run at %s", s, due.Format(time.RFC3339))
 			time.Sleep(wait)
 		}
 		msg, err := s.trigger(c, batch, statePath+".cursor")

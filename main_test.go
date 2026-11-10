@@ -31,9 +31,9 @@ func TestParsePace(t *testing.T) {
 	}
 }
 
-// Frequent whole-list searches hammer the indexers, and so do very frequent
-// batches. The floor also stops a v0.1.1 config like 1m (then a month) from
-// searching every minute.
+// Frequent whole-list searches hammer the indexers. The floor also stops a
+// v0.1.1 config like 1m (then a month) from searching every minute. Batches
+// may trickle as fast as the user likes.
 func TestSchedule(t *testing.T) {
 	s := searches[0]
 	for _, tc := range []struct {
@@ -41,7 +41,7 @@ func TestSchedule(t *testing.T) {
 		ok          bool
 	}{
 		{"1m", "", false}, {"59m", "", false}, {"1h", "", true},
-		{"9m", "5", false}, {"10m", "5", true},
+		{"1m", "1", true},
 		{"1d", "0", false}, {"1d", "x", false},
 	} {
 		t.Setenv("SONARR_MISSING_PACE", tc.pace)
@@ -133,7 +133,14 @@ func TestArrBatch(t *testing.T) {
 	testBatches(t, searches[0], func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/wanted/missing" && r.URL.Query().Get("monitored") == "true":
-			io.WriteString(w, `{"records":[{"id":5},{"id":1},{"id":3}]}`)
+			// Pages like Sonarr, with a default page smaller than the list,
+			// so a request without a big enough pageSize gets a partial list.
+			records := []map[string]int{{"id": 5}, {"id": 1}, {"id": 3}}
+			size, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
+			if err != nil {
+				size = 2
+			}
+			json.NewEncoder(w).Encode(map[string]any{"totalRecords": len(records), "records": records[:min(size, len(records))]})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
 			var cmd struct {
 				Name       string
