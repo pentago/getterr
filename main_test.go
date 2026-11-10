@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -50,6 +53,54 @@ func TestSchedule(t *testing.T) {
 	t.Setenv("SONARR_MISSING_PACE", "")
 	if pace, _, err := s.schedule(); pace != 0 || err != nil {
 		t.Errorf("unset pace: got %v, %v; want disabled", pace, err)
+	}
+}
+
+// Startup must stop on problems that won't fix themselves (bad key, auth
+// proxy, wrong app) but keep waiting for an app that's still starting.
+func TestConnect(t *testing.T) {
+	defer func(d time.Duration) { retryDelay = d }(retryDelay)
+	retryDelay = 0
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(os.Stderr)
+	reply := func(code int, body string) func(http.ResponseWriter) {
+		return func(w http.ResponseWriter) {
+			w.Header().Set("Location", "/login")
+			w.WriteHeader(code)
+			io.WriteString(w, body)
+		}
+	}
+	sonarr := reply(http.StatusOK, `{"appName":"Sonarr","version":"4.0"}`)
+	drop := func(w http.ResponseWriter) {
+		c, _, _ := w.(http.Hijacker).Hijack()
+		c.Close()
+	}
+	for name, tc := range map[string]struct {
+		replies []func(http.ResponseWriter)
+		ok      bool
+	}{
+		"sonarr":              {[]func(http.ResponseWriter){sonarr}, true},
+		"starting behind 5xx": {[]func(http.ResponseWriter){reply(http.StatusBadGateway, ""), sonarr}, true},
+		"unreachable":         {[]func(http.ResponseWriter){drop, sonarr}, true},
+		"bad key":             {[]func(http.ResponseWriter){reply(http.StatusUnauthorized, "")}, false},
+		"auth proxy redirect": {[]func(http.ResponseWriter){reply(http.StatusFound, "")}, false},
+		"login page":          {[]func(http.ResponseWriter){reply(http.StatusOK, "<html>")}, false},
+		"other app":           {[]func(http.ResponseWriter){reply(http.StatusOK, `{"appName":"Radarr"}`)}, false},
+	} {
+		var calls atomic.Int32 // a hijacked connection doesn't sync with the next request
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := int(calls.Add(1)) - 1
+			if n >= len(tc.replies) {
+				http.Error(w, "too many requests", http.StatusBadRequest)
+				return
+			}
+			tc.replies[n](w)
+		}))
+		err := connect(searches[0], conn{client, srv.URL, "key"})
+		srv.Close()
+		if n := int(calls.Load()); (err == nil) != tc.ok || n != len(tc.replies) {
+			t.Errorf("%s: connect = %v after %d requests; want ok=%v after %d", name, err, n, tc.ok, len(tc.replies))
+		}
 	}
 }
 

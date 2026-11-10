@@ -22,7 +22,14 @@ import (
 	"time"
 )
 
-const retryDelay = 5 * time.Minute
+var retryDelay = 5 * time.Minute // a var so tests can shorten it
+
+var client = &http.Client{
+	// Reading a big library's whole Wanted list can take a while.
+	Timeout: 2 * time.Minute,
+	// Never follow redirects: Go would forward X-Api-Key to the target.
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 // statusError is an HTTP reply with an unexpected status code.
 type statusError int
@@ -298,23 +305,24 @@ func (s search) trigger(c conn, batch int, cursorPath string) (string, error) {
 
 // connect waits until the app answers as s's app and accepts the key. A
 // rejected key, an auth proxy or a URL pointing at another app won't fix
-// itself, so those are fatal. An unreachable app or a proxy's 5xx may just be
-// starting up (or be a mistyped address, which looks the same), so those are retried.
-func connect(s search, c conn) {
+// itself, so connect returns those as errors. An unreachable app or a proxy's
+// 5xx may just be starting up (or be a mistyped address, which looks the
+// same), so those are retried.
+func connect(s search, c conn) error {
 	prefix := s.appVar()
 	for {
 		name, version, err := s.app.status(c)
 		if err == nil && strings.EqualFold(name, prefix) {
 			log.Printf("%s - connected to %s %s at %s", s, name, version, c.url)
-			return
+			return nil
 		}
 		if err == nil {
-			log.Fatalf("%s - %s answers as %q, not %s; check %s_URL", s, c.url, name, strings.ToLower(prefix), prefix)
+			return fmt.Errorf("%s answers as %q, not %s; check %s_URL", c.url, name, strings.ToLower(prefix), prefix)
 		}
 		var netErr *url.Error
 		var code statusError
 		if !errors.As(err, &netErr) && !(errors.As(err, &code) && code >= 500) {
-			log.Fatalf("%s - %s rejected the request, check %s_URL and %s_API_KEY: %v", s, c.url, prefix, prefix, err)
+			return fmt.Errorf("%s rejected the request, check %s_URL and %s_API_KEY: %w", c.url, prefix, prefix, err)
 		}
 		log.Printf("%s - cannot reach %s, retrying in %s: %v", s, c.url, retryDelay, err)
 		time.Sleep(retryDelay)
@@ -325,12 +333,6 @@ func main() {
 	stateDir := os.Getenv("STATE_DIR")
 	if stateDir == "" {
 		stateDir = "/data"
-	}
-	client := &http.Client{
-		// Reading a big library's whole Wanted list can take a while.
-		Timeout: 2 * time.Minute,
-		// Never follow redirects: Go would forward X-Api-Key to the target.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	// In v0.1.2 and earlier, one batch size covered both searches of the app.
 	// Ignoring it would silently turn batches into whole-list searches.
@@ -381,7 +383,9 @@ func main() {
 // last successful run time is persisted so container restarts neither re-run
 // early nor skip long (e.g. monthly) paces.
 func run(s search, c conn, pace time.Duration, batch int, statePath string) {
-	connect(s, c)
+	if err := connect(s, c); err != nil {
+		log.Fatalf("%s - %v", s, err)
+	}
 	var last time.Time
 	if b, err := os.ReadFile(statePath); err == nil {
 		last, _ = time.Parse(time.RFC3339, strings.TrimSpace(string(b)))
