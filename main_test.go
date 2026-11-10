@@ -1,10 +1,8 @@
 package main
 
 import (
-	"cmp"
 	"encoding/json"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -30,57 +28,60 @@ func TestParsePace(t *testing.T) {
 	}
 }
 
-// Sonarr/Radarr pass sortDirection straight to SQL, so never-searched items
-// (null lastSearchTime) come first on SQLite but last on Postgres. On both,
-// never-searched items must go first, then the least recently searched.
-func TestOldestSearched(t *testing.T) {
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	at := func(h int) *time.Time { v := base.Add(time.Duration(h) * time.Hour); return &v }
-	type record struct {
-		ID             int        `json:"id"`
-		LastSearchTime *time.Time `json:"lastSearchTime"`
-	}
-	all := []record{{1, at(3)}, {2, nil}, {3, at(1)}, {4, at(4)}, {5, nil}, {6, at(2)}}
-
-	for db, nullKey := range map[string]float64{"sqlite": math.Inf(-1), "postgres": math.Inf(1)} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			q := r.URL.Query()
-			if r.URL.Path != "/api/v3/wanted/missing" || q.Get("sortKey") != "episodes.lastSearchTime" || r.Header.Get("X-Api-Key") != "key" {
-				http.Error(w, "unexpected request "+r.URL.String(), http.StatusBadRequest)
-				return
-			}
-			key := func(r record) float64 {
-				if r.LastSearchTime == nil {
-					return nullKey
-				}
-				return float64(r.LastSearchTime.Unix())
-			}
-			sorted := slices.Clone(all)
-			slices.SortFunc(sorted, func(a, b record) int { return cmp.Compare(key(a), key(b)) })
-			if q.Get("sortDirection") == "descending" {
-				slices.Reverse(sorted)
-			}
-			size, _ := strconv.Atoi(q.Get("pageSize"))
-			json.NewEncoder(w).Encode(map[string]any{"records": sorted[:min(size, len(sorted))]})
-		}))
-		for n, want := range map[int][]int{2: {2, 5}, 3: {2, 5, 3}, 5: {2, 5, 3, 6, 1}, 9: {2, 5, 3, 6, 1, 4}} {
-			got, err := oldestSearched(srv.Client(), srv.URL, "key", "missing", "episodes.lastSearchTime", n)
-			if err != nil || !slices.Equal(got, want) {
-				t.Errorf("%s: oldestSearched(n=%d) = %v, %v; want %v", db, n, got, err, want)
-			}
+// testBatches runs s's batch search of size 2 against handler once per want
+// entry and checks what each run searched, as reported through searched.
+func testBatches(t *testing.T, s search, handler http.HandlerFunc, searched *[]string, want [][]string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Api-Key") != "key" {
+			http.Error(w, "bad key", http.StatusUnauthorized)
+			return
 		}
-		srv.Close()
+		handler(w, r)
+	}))
+	defer srv.Close()
+	c := conn{srv.Client(), srv.URL, "key"}
+	cursor := filepath.Join(t.TempDir(), "cursor")
+	for i, w := range want {
+		*searched = nil
+		if _, err := s.trigger(c, 2, cursor); err != nil || !slices.Equal(*searched, w) {
+			t.Errorf("batch %d searched %v, %v; want %v", i+1, *searched, err, w)
+		}
 	}
 }
 
-// Bazarr's wanted list has no last search time, so batches walk it by ID from
-// a persisted cursor and wrap around, searching every missing language.
+// Batches walk the Wanted list by ID from a persisted cursor and wrap around,
+// so every item gets its turn, even ones Sonarr never marks as searched.
+func TestArrBatch(t *testing.T) {
+	var searched []string
+	testBatches(t, searches[0], func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/wanted/missing" && r.URL.Query().Get("monitored") == "true":
+			io.WriteString(w, `{"records":[{"id":5},{"id":1},{"id":3}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
+			var cmd struct {
+				Name       string
+				EpisodeIDs []int
+			}
+			json.NewDecoder(r.Body).Decode(&cmd)
+			for _, id := range cmd.EpisodeIDs {
+				searched = append(searched, cmd.Name+"/"+strconv.Itoa(id))
+			}
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(w, "unexpected request "+r.URL.String(), http.StatusBadRequest)
+		}
+	}, &searched, [][]string{
+		{"EpisodeSearch/1", "EpisodeSearch/3"},
+		{"EpisodeSearch/5", "EpisodeSearch/1"}, // wraps around
+	})
+}
+
+// Bazarr batches search every missing language of each item.
 func TestBazarrBatch(t *testing.T) {
 	var searched []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	testBatches(t, searches[4], func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Header.Get("X-Api-Key") != "key":
-			http.Error(w, "bad key", http.StatusUnauthorized)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/episodes/wanted":
 			io.WriteString(w, `{"data":[
 				{"sonarrSeriesId":9,"sonarrEpisodeId":5,"missing_subtitles":[{"code2":"en","forced":false,"hi":true}]},
@@ -93,17 +94,8 @@ func TestBazarrBatch(t *testing.T) {
 		default:
 			http.Error(w, "unexpected request "+r.URL.String(), http.StatusBadRequest)
 		}
-	}))
-	defer srv.Close()
-	j := job{"bazarr", "wanted_search_missing_subtitles_series", "BAZARR_SERIES_PACE", "BAZARR_SERIES_BATCH_SIZE", "episodes", "searching missing episode subtitles"}
-	cursor := filepath.Join(t.TempDir(), "cursor")
-	for i, want := range [][]string{
+	}, &searched, [][]string{
 		{"7/1/en/false/false", "7/1/de/true/false", "7/3/en/false/false"},
 		{"9/5/en/false/true", "7/1/en/false/false", "7/1/de/true/false"}, // wraps around
-	} {
-		searched = nil
-		if _, err := bazarrBatch(srv.Client(), j, srv.URL, "key", 2, cursor); err != nil || !slices.Equal(searched, want) {
-			t.Errorf("batch %d searched %v, %v; want %v", i+1, searched, err, want)
-		}
-	}
+	})
 }
