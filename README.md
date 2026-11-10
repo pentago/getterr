@@ -75,7 +75,7 @@ When getterr handles a Bazarr search, set that search to "Never" in Bazarr under
 ## Good to know
 
 - getterr runs each search once when it first starts, then on your schedule after that.
-- It remembers when each search last ran. That's what the `/data` volume is for, so restarting or updating the container won't trigger extra searches.
+- It remembers when each search last ran and where each batch left off. That's what the `/data` volume is for, so restarting or updating the container won't trigger extra searches.
 - When it starts, getterr checks that it can talk to Sonarr, Radarr and Bazarr. If one rejects your API key, or the address points to the wrong app, getterr stops right away and the log says what to fix.
 - If an app can't be reached, at startup or later, getterr tries again every 5 minutes and doesn't lose its schedule. A mistyped address looks the same as an app that's still starting, so if the log keeps saying `cannot reach`, check the address.
 - Without a batch size, each search goes through your whole Missing or Cutoff Unmet list. On a big library that's a lot of queries, so either set a batch size or, if your indexers have daily limits, set a Query Limit for each indexer in Prowlarr.
