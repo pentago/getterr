@@ -9,7 +9,7 @@ getterr is a tiny Go service that replaces Huntarr's paced backlog searches. On 
 Everything lives in `main.go` (`package main`, stdlib only).
 
 1. `main` reads `STATE_DIR` (default `/data`) and builds one shared `http.Client`. It then walks the `jobs` table.
-2. `jobs` has one row per search: `{app, command, paceVar, batchVar, wanted}`.
+2. `jobs` has one row per search: `{app, command, paceVar, batchVar, wanted, desc}`; `desc` is the human-readable search name used in logs.
 
    | Pace env var | Command | Wanted list |
    |---|---|---|
@@ -90,7 +90,7 @@ STATE_DIR=/tmp/getterr SONARR_URL=http://127.0.0.1:8989 SONARR_API_KEY=... SONAR
 - **No dependencies:** stdlib only, so there's no `go.sum`. Keep it that way unless a dependency clearly pays for itself. If you add one, also add a `gomod` entry to `.github/dependabot.yml`.
 - **Single file:** everything stays in the root `package main`. The Dockerfile copies only `go.mod *.go`, so subpackages or a `go.sum` need that `COPY` line changed.
 - **Request body:** JSON via `encoding/json` in `api`.
-- **Logging:** stdlib `log` to stderr, formatted `"<app> <Command>: <message>"` (e.g. `connected to Sonarr <v> at <url>`, `cannot reach <url>, retrying in 5m0s: <err>`, `queued`, `queued MoviesSearch for 5 items`, `nothing to search`, `next run at <RFC3339>`, `failed, retrying in 5m0s: <err>`, `disabled (X unset)`). No levels, no structured logging.
+- **Logging:** stdlib `log` to stderr, formatted `"<app>: <desc> - <message>"` via `job.String` (e.g. `sonarr: searching missing episodes - next run at <RFC3339>`). Messages: `connected to Sonarr <v> at <url>`, `cannot reach <url>, retrying in 5m0s: <err>`, `queued`, `queued search for 5 movies`, `queued 13 subtitles for 5 movies` (one per missing language), `nothing to search`, `next run at <RFC3339>`, `failed, retrying in 5m0s: <err>`, `disabled (X unset)`. No levels, no structured logging.
 - **Errors:** return plain `fmt.Errorf` errors. Use `log.Fatalf` only for startup errors; at runtime, log and retry.
 
 ## Important Files

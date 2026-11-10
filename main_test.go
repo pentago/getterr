@@ -95,7 +95,7 @@ func TestBazarrBatch(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	j := job{"bazarr", "wanted_search_missing_subtitles_series", "BAZARR_SERIES_PACE", "BAZARR_SERIES_BATCH_SIZE", "episodes"}
+	j := job{"bazarr", "wanted_search_missing_subtitles_series", "BAZARR_SERIES_PACE", "BAZARR_SERIES_BATCH_SIZE", "episodes", "searching missing episode subtitles"}
 	cursor := filepath.Join(t.TempDir(), "cursor")
 	for i, want := range [][]string{
 		{"7/1/en/false/false", "7/1/de/true/false", "7/3/en/false/false"},

@@ -32,22 +32,25 @@ func (e statusError) Error() string {
 }
 
 type job struct {
-	app, command, paceVar, batchVar, wanted string
+	app, command, paceVar, batchVar, wanted, desc string
 }
 
+// String is the log prefix, e.g. "sonarr: searching missing episodes".
+func (j job) String() string { return j.app + ": " + j.desc }
+
 var jobs = []job{
-	{"sonarr", "MissingEpisodeSearch", "SONARR_MISSING_PACE", "SONARR_BATCH_SIZE", "missing"},
-	{"sonarr", "CutoffUnmetEpisodeSearch", "SONARR_UNMET_PACE", "SONARR_BATCH_SIZE", "cutoff"},
-	{"radarr", "MissingMoviesSearch", "RADARR_MISSING_PACE", "RADARR_BATCH_SIZE", "missing"},
-	{"radarr", "CutoffUnmetMoviesSearch", "RADARR_UNMET_PACE", "RADARR_BATCH_SIZE", "cutoff"},
-	{"bazarr", "wanted_search_missing_subtitles_series", "BAZARR_SERIES_PACE", "BAZARR_SERIES_BATCH_SIZE", "episodes"},
-	{"bazarr", "wanted_search_missing_subtitles_movies", "BAZARR_MOVIES_PACE", "BAZARR_MOVIES_BATCH_SIZE", "movies"},
+	{"sonarr", "MissingEpisodeSearch", "SONARR_MISSING_PACE", "SONARR_BATCH_SIZE", "missing", "searching missing episodes"},
+	{"sonarr", "CutoffUnmetEpisodeSearch", "SONARR_UNMET_PACE", "SONARR_BATCH_SIZE", "cutoff", "searching cutoff unmet episodes"},
+	{"radarr", "MissingMoviesSearch", "RADARR_MISSING_PACE", "RADARR_BATCH_SIZE", "missing", "searching missing movies"},
+	{"radarr", "CutoffUnmetMoviesSearch", "RADARR_UNMET_PACE", "RADARR_BATCH_SIZE", "cutoff", "searching cutoff unmet movies"},
+	{"bazarr", "wanted_search_missing_subtitles_series", "BAZARR_SERIES_PACE", "BAZARR_SERIES_BATCH_SIZE", "episodes", "searching missing episode subtitles"},
+	{"bazarr", "wanted_search_missing_subtitles_movies", "BAZARR_MOVIES_PACE", "BAZARR_MOVIES_BATCH_SIZE", "movies", "searching missing movie subtitles"},
 }
 
 // batches says how Sonarr/Radarr search a batchVar-sized batch of wanted items by ID.
-var batches = map[string]struct{ sortKey, command, idsField string }{
-	"sonarr": {"episodes.lastSearchTime", "EpisodeSearch", "episodeIds"},
-	"radarr": {"movies.lastSearchTime", "MoviesSearch", "movieIds"},
+var batches = map[string]struct{ sortKey, command, idsField, items string }{
+	"sonarr": {"episodes.lastSearchTime", "EpisodeSearch", "episodeIds", "episodes"},
+	"radarr": {"movies.lastSearchTime", "MoviesSearch", "movieIds", "movies"},
 }
 
 var units = map[byte]time.Duration{
@@ -124,7 +127,7 @@ func trigger(client *http.Client, j job, baseURL, apiKey string, batch int, stat
 			return "nothing to search", nil
 		}
 		cmd = map[string]any{"name": b.command, b.idsField: ids}
-		msg = fmt.Sprintf("queued %s for %d items", b.command, len(ids))
+		msg = fmt.Sprintf("queued search for %d %s", len(ids), b.items)
 	}
 	// Sonarr/Radarr answer a queued command with 201.
 	return msg, api(client, http.MethodPost, baseURL+"/api/v3/command", apiKey, cmd, nil, http.StatusCreated)
@@ -210,9 +213,9 @@ func bazarrBatch(client *http.Client, j job, baseURL, apiKey string, n int, curs
 		}
 	}
 	if err := os.WriteFile(cursorPath, []byte(strconv.Itoa(id(items[len(items)-1]))), 0o644); err != nil {
-		log.Printf("%s %s: cannot persist batch position: %v", j.app, j.command, err)
+		log.Printf("%s - cannot persist batch position: %v", j, err)
 	}
-	return fmt.Sprintf("queued %d subtitle searches for %d %s", searches, len(items), j.wanted), nil
+	return fmt.Sprintf("queued %d subtitles for %d %s", searches, len(items), j.wanted), nil
 }
 
 // connect waits until baseURL answers as j.app and accepts apiKey. A rejected
@@ -239,18 +242,18 @@ func connect(client *http.Client, j job, baseURL, apiKey string) {
 			err = api(client, http.MethodGet, baseURL+"/api/v3/system/status", apiKey, nil, &status, http.StatusOK)
 		}
 		if err == nil && strings.EqualFold(status.AppName, j.app) {
-			log.Printf("%s %s: connected to %s %s at %s", j.app, j.command, status.AppName, status.Version, baseURL)
+			log.Printf("%s - connected to %s %s at %s", j, status.AppName, status.Version, baseURL)
 			return
 		}
 		if err == nil {
-			log.Fatalf("%s %s: %s answers as %q, not %s; check %s_URL", j.app, j.command, baseURL, status.AppName, j.app, prefix)
+			log.Fatalf("%s - %s answers as %q, not %s; check %s_URL", j, baseURL, status.AppName, j.app, prefix)
 		}
 		var netErr *url.Error
 		var code statusError
 		if !errors.As(err, &netErr) && !(errors.As(err, &code) && code >= 500) {
-			log.Fatalf("%s %s: %s rejected the request, check %s_URL and %s_API_KEY: %v", j.app, j.command, baseURL, prefix, prefix, err)
+			log.Fatalf("%s - %s rejected the request, check %s_URL and %s_API_KEY: %v", j, baseURL, prefix, prefix, err)
 		}
-		log.Printf("%s %s: cannot reach %s, retrying in %s: %v", j.app, j.command, baseURL, retryDelay, err)
+		log.Printf("%s - cannot reach %s, retrying in %s: %v", j, baseURL, retryDelay, err)
 		time.Sleep(retryDelay)
 	}
 }
@@ -270,23 +273,23 @@ func main() {
 	for _, j := range jobs {
 		raw := os.Getenv(j.paceVar)
 		if raw == "" {
-			log.Printf("%s %s: disabled (%s unset)", j.app, j.command, j.paceVar)
+			log.Printf("%s - disabled (%s unset)", j, j.paceVar)
 			continue
 		}
 		pace, err := parsePace(raw)
 		if err != nil {
-			log.Fatalf("%s: %v", j.paceVar, err)
+			log.Fatalf("%s - %s: %v", j, j.paceVar, err)
 		}
 		prefix := strings.ToUpper(j.app)
 		baseURL := strings.TrimRight(os.Getenv(prefix+"_URL"), "/")
 		apiKey := os.Getenv(prefix + "_API_KEY")
 		if baseURL == "" || apiKey == "" {
-			log.Fatalf("%s is set but %s_URL or %s_API_KEY is missing", j.paceVar, prefix, prefix)
+			log.Fatalf("%s - %s is set but %s_URL or %s_API_KEY is missing", j, j.paceVar, prefix, prefix)
 		}
 		batch := 0
 		if raw := os.Getenv(j.batchVar); raw != "" {
 			if batch, err = strconv.Atoi(raw); err != nil || batch <= 0 {
-				log.Fatalf("%s: invalid %q, want a positive number", j.batchVar, raw)
+				log.Fatalf("%s - %s: invalid %q, want a positive number", j, j.batchVar, raw)
 			}
 		}
 		// SONARR_MISSING_PACE -> sonarr-missing
@@ -312,19 +315,19 @@ func run(client *http.Client, j job, pace time.Duration, batch int, baseURL, api
 	for {
 		next := last.Add(pace)
 		if wait := time.Until(next); wait > 0 {
-			log.Printf("%s %s: next run at %s", j.app, j.command, next.Format(time.RFC3339))
+			log.Printf("%s - next run at %s", j, next.Format(time.RFC3339))
 			time.Sleep(wait)
 		}
 		msg, err := trigger(client, j, baseURL, apiKey, batch, statePath)
 		if err != nil {
-			log.Printf("%s %s: failed, retrying in %s: %v", j.app, j.command, retryDelay, err)
+			log.Printf("%s - failed, retrying in %s: %v", j, retryDelay, err)
 			time.Sleep(retryDelay)
 			continue
 		}
-		log.Printf("%s %s: %s", j.app, j.command, msg)
+		log.Printf("%s - %s", j, msg)
 		last = time.Now()
 		if err := os.WriteFile(statePath, []byte(last.Format(time.RFC3339)), 0o644); err != nil {
-			log.Printf("%s %s: cannot persist last run: %v", j.app, j.command, err)
+			log.Printf("%s - cannot persist last run: %v", j, err)
 		}
 	}
 }
