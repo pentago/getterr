@@ -144,9 +144,14 @@ func (bazarr) status(c conn) (string, string, error) {
 	return "Bazarr", s.Data.Version, err
 }
 
-// Bazarr answers a started task with 204.
+// Bazarr answers a started task with 204, and with 500 if there's no such
+// task, which is the case while Bazarr isn't connected to Sonarr or Radarr.
 func (bazarr) searchAll(c conn, task string) error {
-	return c.do(http.MethodPost, "/api/system/tasks?taskid="+task, nil, nil, http.StatusNoContent)
+	err := c.do(http.MethodPost, "/api/system/tasks?taskid="+task, nil, nil, http.StatusNoContent)
+	if code, ok := errors.AsType[statusError](err); ok && code == http.StatusInternalServerError {
+		return fmt.Errorf("%w; Bazarr has no task %s unless it's connected to Sonarr/Radarr", err, task)
+	}
+	return err
 }
 
 // searchBatch queues a search for every missing subtitle language of the batch.
