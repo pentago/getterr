@@ -79,5 +79,5 @@ When getterr handles a Bazarr search, set that search to "Never" in Bazarr under
 - When it starts, getterr checks that it can talk to Sonarr, Radarr and Bazarr. If one rejects your API key, or the address points to the wrong app, getterr stops right away and the log says what to fix.
 - If an app can't be reached, at startup or later, getterr tries again every 5 minutes and doesn't lose its schedule. A mistyped address looks the same as an app that's still starting, so if the log keeps saying `cannot reach`, check the address.
 - Without a batch size, each search goes through your whole Missing or Cutoff Unmet list. On a big library that's a lot of queries, so either set a batch size or, if your indexers have daily limits, set a Query Limit for each indexer in Prowlarr.
-- Check `docker logs getterr` to see what it's doing.
+- Check `docker logs getterr` to see what it's doing. After each Sonarr or Radarr search finishes, the log lists every release it grabbed and the indexer it came from, for example `radarr: searching cutoff unmet movies - grabbed MyTracker - Some.Movie.2160p.x265-GRP`. Grabbed means sent to your download client; the download itself happens after that.
 - It works on regular PCs, ARM machines, and Apple silicon Macs running Docker.
