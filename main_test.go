@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,7 +119,7 @@ func testBatches(t *testing.T, s search, handler http.HandlerFunc, searched *[]s
 	cursor := filepath.Join(t.TempDir(), "cursor")
 	for i, w := range want {
 		*searched = nil
-		if _, err := s.trigger(c, 2, cursor); err != nil || !slices.Equal(*searched, w) {
+		if _, _, err := s.trigger(c, 2, cursor); err != nil || !slices.Equal(*searched, w) {
 			t.Errorf("batch %d searched %v, %v; want %v", i+1, *searched, err, w)
 		}
 	}
@@ -148,6 +150,7 @@ func TestArrBatch(t *testing.T) {
 				searched = append(searched, cmd.Name+"/"+strconv.Itoa(id))
 			}
 			w.WriteHeader(http.StatusCreated)
+			io.WriteString(w, `{"id":1}`)
 		default:
 			http.Error(w, "unexpected request "+r.URL.String(), http.StatusBadRequest)
 		}
@@ -155,6 +158,45 @@ func TestArrBatch(t *testing.T) {
 		{"EpisodeSearch/1", "EpisodeSearch/3"},
 		{"EpisodeSearch/5", "EpisodeSearch/1"}, // wraps around
 	})
+}
+
+// Only grabs the command caused may be logged as getterr's: made while it ran,
+// by a manual search, for one of its items. RSS grabs and other searches'
+// grabs aren't, and a season pack is one release, not one per episode. An app
+// restarting mid-search is logged and mustn't lose the report.
+func TestArrGrabs(t *testing.T) {
+	defer func(p, r time.Duration) { pollDelay, retryDelay = p, r }(pollDelay, retryDelay)
+	pollDelay, retryDelay = 0, 0
+	var out bytes.Buffer
+	log.SetOutput(&out)
+	defer log.SetOutput(os.Stderr)
+	var polls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case r.URL.Path == "/api/v3/command/7" && polls.Add(1) == 1: // restarting
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case r.URL.Path == "/api/v3/command/7" && polls.Load() == 2: // still running
+			io.WriteString(w, `{"started":"2026-11-14T10:00:00Z","body":{"episodeIds":[1,2]}}`)
+		case r.URL.Path == "/api/v3/command/7":
+			io.WriteString(w, `{"started":"2026-11-14T10:00:00Z","ended":"2026-11-14T10:05:00Z","body":{"episodeIds":[1,2]}}`)
+		case r.URL.Path == "/api/v3/history/since" && q.Get("date") == "2026-11-14T10:00:00Z" && q.Get("eventType") == "grabbed":
+			io.WriteString(w, `[
+				{"date":"2026-11-14T10:01:00Z","episodeId":1,"sourceTitle":"Show.S01.Pack","data":{"indexer":"A","releaseSource":"UserInvokedSearch"}},
+				{"date":"2026-11-14T10:01:00Z","episodeId":2,"sourceTitle":"Show.S01.Pack","data":{"indexer":"A","releaseSource":"UserInvokedSearch"}},
+				{"date":"2026-11-14T10:02:00Z","episodeId":2,"sourceTitle":"Rss.Grab","data":{"indexer":"A","releaseSource":"Rss"}},
+				{"date":"2026-11-14T10:03:00Z","episodeId":9,"sourceTitle":"Other.Item","data":{"indexer":"B","releaseSource":"UserInvokedSearch"}},
+				{"date":"2026-11-14T10:06:00Z","episodeId":1,"sourceTitle":"After.Search","data":{"indexer":"B","releaseSource":"UserInvokedSearch"}}]`)
+		default:
+			http.Error(w, "unexpected request "+r.URL.String(), http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	searches[0].logGrabs(conn{srv.Client(), srv.URL, "key"}, 7)
+	if s := out.String(); !strings.Contains(s, " - cannot reach ") || strings.Count(s, " - grabbed ") != 1 ||
+		!strings.Contains(s, " - grabbed A - Show.S01.Pack\n") {
+		t.Errorf("logged:\n%s\nwant one retry and only grabbed A - Show.S01.Pack", s)
+	}
 }
 
 // Bazarr batches search every missing language of each item.
